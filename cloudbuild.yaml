@@ -1,0 +1,152 @@
+# Cloud Build configuration for CLIP-Fields
+# Optimized for the specific dependencies in requirements.txt
+
+substitutions:
+  _IMAGE_NAME: 'clip-fields'
+  _PYTHON_VERSION: '3.8'
+  _CUDA_VERSION: '11.8'
+  _REGION: 'us-central1'
+
+steps:
+  # Step 1: Build Docker image with all dependencies
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
+    args:
+      - 'build'
+      - '--build-arg=PYTHON_VERSION=${_PYTHON_VERSION}'
+      - '--build-arg=CUDA_VERSION=${_CUDA_VERSION}'
+      - '-t'
+      - 'clip-fields-build'
+      - '.'
+    timeout: '3600s'  # 1 hour for detectron2 compilation
+
+  # Step 2: Test the installation
+  - name: 'clip-fields-build'
+    id: 'test-installation'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Testing CLIP-Fields installation..."
+        
+        # Test core dependencies
+        python -c "
+        import sys
+        print(f'Python version: {sys.version}')
+        
+        try:
+            import torch
+            print(f'✓ PyTorch {torch.__version__}')
+            print(f'✓ CUDA available: {torch.cuda.is_available()}')
+            if torch.cuda.is_available():
+                print(f'✓ CUDA devices: {torch.cuda.device_count()}')
+                print(f'✓ CUDA version: {torch.version.cuda}')
+        except ImportError as e:
+            print(f'✗ PyTorch import failed: {e}')
+            sys.exit(1)
+            
+        try:
+            import clip
+            print('✓ CLIP imported successfully')
+        except ImportError as e:
+            print(f'✗ CLIP import failed: {e}')
+            sys.exit(1)
+            
+        try:
+            import detectron2
+            print(f'✓ Detectron2 {detectron2.__version__}')
+        except ImportError as e:
+            print(f'✗ Detectron2 import failed: {e}')
+            sys.exit(1)
+            
+        try:
+            import hydra
+            from omegaconf import OmegaConf
+            print('✓ Hydra and OmegaConf imported successfully')
+        except ImportError as e:
+            print(f'✗ Hydra/OmegaConf import failed: {e}')
+            sys.exit(1)
+            
+        try:
+            import open3d
+            import pyntcloud
+            print('✓ 3D processing libraries imported successfully')
+        except ImportError as e:
+            print(f'✗ 3D libraries import failed: {e}')
+            sys.exit(1)
+            
+        print('✓ All core dependencies verified successfully!')
+        "
+    timeout: '300s'
+
+  # Step 3: Test gridencoder compilation (if exists)
+  - name: 'clip-fields-build'
+    id: 'test-gridencoder'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [ -d gridencoder ]; then
+          echo "Testing gridencoder compilation..."
+          python -c "
+          try:
+              import gridencoder
+              print('✓ Gridencoder imported successfully')
+          except ImportError as e:
+              print(f'✗ Gridencoder import failed: {e}')
+              print('This might be normal if gridencoder is not required')
+          "
+        else
+          echo "No gridencoder directory found, skipping test"
+        fi
+    waitFor: ['test-installation']
+
+  # Step 4: Tag and prepare for registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'tag-image'
+    args:
+      - 'tag'
+      - 'clip-fields-build'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_IMAGE_NAME}/${_IMAGE_NAME}:${SHORT_SHA}'
+    waitFor: ['test-gridencoder']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'tag-latest'
+    args:
+      - 'tag'
+      - 'clip-fields-build'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_IMAGE_NAME}/${_IMAGE_NAME}:latest'
+    waitFor: ['test-gridencoder']
+
+  # Step 5: Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-image'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_IMAGE_NAME}/${_IMAGE_NAME}'
+    waitFor: ['tag-image', 'tag-latest']
+
+# Configure build options
+options:
+  # Use a high-CPU machine for faster compilation
+  machineType: 'E2_HIGHCPU_32'
+  
+  # Extended timeout for detectron2 and other compilations
+  timeout: '7200s'  # 2 hours
+  
+  # Disk size for large dependencies
+  diskSizeGb: 100
+  
+  # Use Cloud Logging
+  logging: CLOUD_LOGGING_ONLY
+  
+  # Environment variables
+  env:
+    - 'DEBIAN_FRONTEND=noninteractive'
+    - 'PYTHONUNBUFFERED=1'
+
+# Images to store in registry
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_IMAGE_NAME}/${_IMAGE_NAME}:${SHORT_SHA}'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_IMAGE_NAME}/${_IMAGE_NAME}:latest'

@@ -1,0 +1,85 @@
+# Multi-stage Dockerfile for CLIP-Fields
+FROM nvidia/cuda:11.8-devel-ubuntu20.04 as base
+
+ARG PYTHON_VERSION=3.8
+ARG CUDA_VERSION=11.8
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_HOME=/usr/local/cuda-${CUDA_VERSION}
+ENV PATH=$CUDA_HOME/bin:$PATH
+ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
+# Install system dependencies needed for detectron2 and other packages
+RUN apt-get update && apt-get install -y \
+    wget \
+    bzip2 \
+    ca-certificates \
+    git \
+    vim \
+    build-essential \
+    cmake \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Miniconda
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
+    /bin/bash ~/miniconda.sh -b -p /opt/conda && \
+    rm ~/miniconda.sh
+
+# Add conda to path
+ENV PATH="/opt/conda/bin:$PATH"
+
+# Update conda
+RUN conda update conda -y
+
+# Production stage
+FROM base as production
+
+WORKDIR /app
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Create conda environment and install dependencies
+RUN conda create -n cf python=${PYTHON_VERSION} -y
+
+# Activate environment and install PyTorch first (required for detectron2)
+RUN /bin/bash -c "source activate cf && \
+    conda install -y pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=${CUDA_VERSION} -c pytorch -c nvidia"
+
+# Install git-based dependencies separately with better error handling
+RUN /bin/bash -c "source activate cf && \
+    pip install --no-cache-dir git+https://github.com/openai/CLIP.git && \
+    pip install --no-cache-dir git+https://github.com/facebookresearch/detectron2.git && \
+    pip install --no-cache-dir git+https://github.com/zhanghang1989/PyTorch-Encoding@c959dab8312b637fcc7edce83607acb4b0f82645"
+
+# Install remaining requirements (excluding the git+ ones and duplicates)
+RUN /bin/bash -c "source activate cf && \
+    grep -v '^git+' requirements.txt | grep -v '^torch-encoding' | sort | uniq > requirements_filtered.txt && \
+    pip install --no-cache-dir -r requirements_filtered.txt"
+
+# Copy source code
+COPY . .
+
+# Compile custom CUDA modules
+RUN /bin/bash -c "source activate cf && \
+    if [ -d gridencoder ]; then \
+        cd gridencoder && \
+        python setup.py install && \
+        cd ..; \
+    fi"
+
+# Set up entrypoint to use conda environment
+RUN echo '#!/bin/bash\nsource activate cf\nexec "$@"' > /entrypoint.sh && \
+    chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python", "train.py", "--help"]
